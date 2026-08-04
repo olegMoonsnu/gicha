@@ -1,455 +1,245 @@
 import java.util.Base64
 import java.util.logging.Logger
 
-
 /**
+ * Сервис работы с вложениями Naumen.
  *
+ * Этапы работы:
  *
+ * 1. validateAttachments()
+ *    Проверяет входящие файлы до создания заявки.
  *
- * Отвечает за:
- *
- * 1. Проверку входящих файлов
- * 2. Подготовку файлов
- * 3. Прикрепление файлов к созданной заявке
- *
- *
- * Использование:
- *
- * Сначала:
- *
- * validateAttachments()
- *
- * Потом после создания serviceCall:
- *
- * attachFiles()
+ * 2. createAttachments()
+ *    После создания заявки создаёт объекты File
+ *    и связывает их через source = UUID объекта.
  *
  */
-class NaumenAttachmentModule {
-
+class NaumenAttachmentService {
 
     private static final Logger logger =
             Logger.getLogger(
-                    NaumenAttachmentModule.name
+                    NaumenAttachmentService.name
             )
 
-
-
-    // Максимальное количество файлов
     private static final int MAX_FILES = 10
-
-
-    // Максимальный размер одного файла
-    private static final long MAX_FILE_SIZE =
-            10 * 1024 * 1024
-
-
-
-    // Максимальный общий размер файлов
-    private static final long MAX_TOTAL_SIZE =
-            50 * 1024 * 1024
-
-
+    private static final long MAX_FILE_SIZE = 10 * 1024 * 1024
+    private static final long MAX_TOTAL_SIZE = 50 * 1024 * 1024
 
 
     /**
-     *
-     * Проверяем файлы ДО создания заявки.
+     * Проверяем файлы перед созданием serviceCall.
      *
      * Если хотя бы один файл плохой -
-     * заявку создавать нельзя.
-     *
+     * возвращаем ошибку и заявку не создаём.
      */
-    Map validateAttachments(
-            List attachments
-    ){
+    Map validateAttachments(List attachments) {
 
-
-        // Если файлов нет,
-        // продолжаем обычное создание заявки
-
-        if(!attachments){
-
-            logger.info(
-                    "Файлы отсутствуют"
-            )
-
+        if (!attachments) {
+            logger.info("Вложения отсутствуют")
 
             return [
-                    success:true,
-                    files:[]
+                    success: true,
+                    files: []
             ]
-
         }
 
-
-
-
-        if(attachments.size() > MAX_FILES){
-
-
+        if (attachments.size() > MAX_FILES) {
             return [
-                    success:false,
-                    message:
-                    "Превышено количество файлов"
+                    success: false,
+                    message: "Превышено количество файлов"
             ]
-
         }
-
-
-
 
         List preparedFiles = []
-
         long totalSize = 0
 
-
-
-
-        attachments.each { attachment ->
-
+        for (Map attachment : attachments) {
 
             logger.info(
-                    "Проверка файла: "
-                    + attachment.fileName
+                    "Проверка файла: ${attachment.fileName}"
             )
 
+            Map result = prepareFile(attachment)
 
-
-            Map result =
-                    prepareFile(
-                            attachment
-                    )
-
-
-
-            if(!result.success){
-
+            if (!result.success) {
                 return result
-
             }
 
+            preparedFiles.add(result.file)
 
+            totalSize += result.file.size
 
-            preparedFiles.add(
-                    result.file
-            )
-
-
-
-            totalSize +=
-                    result.file.size
-
-
-
-
-            if(totalSize > MAX_TOTAL_SIZE){
-
-
+            if (totalSize > MAX_TOTAL_SIZE) {
                 return [
-                        success:false,
-                        message:
-                        "Общий размер файлов превышен"
+                        success: false,
+                        message: "Общий размер файлов превышен"
                 ]
-
             }
-
-
         }
 
-
-
         return [
-
-                success:true,
-
-                files:preparedFiles
-
+                success: true,
+                files: preparedFiles
         ]
-
     }
 
 
-
-
-
-
     /**
-     *
      * Проверка одного файла.
      *
-     * Base64 превращаем в byte[]
-     *
+     * Base64 -> byte[]
      */
-    private Map prepareFile(
-            Map attachment
-    ){
+    private Map prepareFile(Map attachment) {
 
-
-        if(!attachment.fileName){
-
-
+        if (!attachment.fileName) {
             return [
-                    success:false,
-                    message:
-                    "Не указано имя файла"
+                    success: false,
+                    message: "Не указано имя файла"
             ]
-
         }
 
-
-
-        if(!attachment.contentBase64){
-
-
+        if (!attachment.contentBase64) {
             return [
-                    success:false,
+                    success: false,
                     message:
-                    "Отсутствует содержимое файла "
-                    + attachment.fileName
+                            "Нет содержимого файла ${attachment.fileName}"
             ]
-
         }
-
-
-
 
         byte[] bytes
 
-
-
-        try{
-
-
-            bytes =
-                    Base64.decoder.decode(
-                            attachment.contentBase64
-                    )
-
-
-        }
-        catch(Exception e){
-
+        try {
+            bytes = Base64.decoder.decode(
+                    attachment.contentBase64
+            )
+        } catch (Exception e) {
 
             logger.info(
-                    "Ошибка Base64 файла "
-                    + attachment.fileName
+                    "Ошибка Base64 файла ${attachment.fileName}"
             )
 
-
             return [
-
-                    success:false,
-
+                    success: false,
                     message:
-                    "Файл поврежден "
-                    + attachment.fileName
-
+                            "Поврежден Base64 файла ${attachment.fileName}"
             ]
-
         }
 
-
-
-
-
-        if(bytes.length > MAX_FILE_SIZE){
-
-
+        if (bytes.length > MAX_FILE_SIZE) {
             return [
-
-                    success:false,
-
+                    success: false,
                     message:
-                    "Файл слишком большой "
-                    + attachment.fileName
-
+                            "Файл слишком большой ${attachment.fileName}"
             ]
-
         }
-
-
-
-
 
         return [
-
-                success:true,
-
-
-                file:[
-
-                        fileName:
-                                attachment.fileName,
-
-
-                        contentType:
-                                attachment.contentType,
-
-
-                        size:
-                                bytes.length,
-
-
-                        bytes:
-                                bytes
-
+                success: true,
+                file: [
+                        fileName: attachment.fileName,
+                        contentType: attachment.contentType,
+                        size: bytes.length,
+                        bytes: bytes
                 ]
-
         ]
-
-
     }
 
 
-
-
-
-
-
-
     /**
+     * Создание файлов после создания заявки.
      *
-     * Этот метод вызываем ПОСЛЕ создания заявки.
+     * sourceUuid:
      *
-     * Передаем:
-     *
-     * files - подготовленные файлы
-     *
-     *
+     * serviceCall$12345
      *
      */
-    List attachFiles(
+    List createAttachments(
             List files,
-            String uuid
-    ){
-
+            String sourceUuid
+    ) {
 
         List result = []
 
+        for (Map file : files) {
 
+            try {
 
-        files.each { file ->
+                def createdFile =
+                        createFile(
+                                file,
+                                sourceUuid
+                        )
 
+                result.add([
+                        fileName: file.fileName,
+                        success: true,
+                        uuid: createdFile.UUID
+                ])
 
-
-            try{
-
-
-                uploadFile(
-                        file,
-                        uuid
-                )
-
-
-
-                result << [
-
-                        fileName:
-                                file.fileName,
-
-
-                        success:true
-
-                ]
-
-
-
-            }
-            catch(Exception e){
-
-
+            } catch (Exception e) {
 
                 logger.info(
-                        "Ошибка загрузки файла "
-                        + file.fileName
+                        "Ошибка создания файла ${file.fileName}"
                 )
 
-
-
-                result << [
-
-                        fileName:
-                                file.fileName,
-
-
-                        success:false,
-
-                        message:
-                                e.message
-
-                ]
-
+                result.add([
+                        fileName: file.fileName,
+                        success: false,
+                        message: e.message
+                ])
             }
-
-
         }
 
-
-
         return result
-
     }
-
-
-
-
-
-
 
 
     /**
+     * Создание объекта File в Naumen.
      *
-     * Отправка одного файла в Naumen.
-     *
-     * Используется REST метод:
-     *
-     * POST
-     *
-     * /services/rest/add-file/{UUID}
-     *
-     *
-     * multipart:
-     *
-     * content = bytes файла
-     *
+     * Здесь уже используется внутренний API Naumen.
      */
-    private void uploadFile(
+    private def createFile(
             Map file,
-            String uuid
-    ){
-
-
-
-        logger.info(
-                "Прикрепление файла "
-                + file.fileName
-                + " к "
-                + uuid
-        )
-
-
+            String sourceUuid
+    ) {
 
         /*
+         * Здесь нужно использовать ваш механизм создания объектов:
          *
-         * Здесь будет реальная отправка:
-         *
-         * HttpClient
-         *
-         * POST add-file/{uuid}
-         *
-         * multipart/form-data
-         *
-         * content=file.bytes
+         * tools.create()
+         * api.create()
+         * metadata.create()
          *
          */
 
+        def naumenFile = tools.create("File")
 
+        naumenFile.name =
+                file.fileName
 
-        // TODO замен
+        naumenFile.contentType =
+                file.contentType
 
+        naumenFile.content =
+                file.bytes
 
+        /*
+         * Главная связь:
+         *
+         * файл принадлежит объекту
+         */
+        naumenFile.source =
+                sourceUuid
 
+        tools.save(
+                naumenFile
+        )
+
+        logger.info(
+                "Файл создан ${file.fileName}"
+        )
+
+        return naumenFile
     }
-
-
 }
