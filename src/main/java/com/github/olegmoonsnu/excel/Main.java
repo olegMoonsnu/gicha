@@ -8,6 +8,7 @@ import java.net.URI;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -29,11 +30,12 @@ public class Main {
     private static final String EXCEL_FILE = "input.xlsx";
     private static final int SHEET_NUMBER = 1;
     private static final int FIRST_DATA_ROW = 2;
-    private static final String COLUMN = "B";
-    private static final int COLUMN_OFFSET = 0; // -1: A, 0: B, +1: C
+    private static final String KEY_COLUMN = "A";
+    private static final String VALUE_COLUMN = "B";
+    private static final int COLUMN_OFFSET = 0; // Общий сдвиг для обоих столбцов.
     private static final boolean SPLIT_BY_COMMA = true;
     private static final boolean SPLIT_BY_NEWLINE = true;
-    private static final ArrayFormat OUTPUT_FORMAT = ArrayFormat.JAVA;
+    private static final MapFormat OUTPUT_FORMAT = MapFormat.JAVA;
 
     public static void main(String[] args) {
         if (args.length > 1) {
@@ -46,9 +48,9 @@ public class Main {
             if (file.toString().toLowerCase(Locale.ROOT).endsWith(".xls")) {
                 throw new IllegalArgumentException("Сохраните файл .xls в Excel в формате .xlsx.");
             }
-            List<String> values = XlsxColumnReader.read(file, SHEET_NUMBER, FIRST_DATA_ROW,
-                    COLUMN, COLUMN_OFFSET, createSeparator());
-            System.out.println(OUTPUT_FORMAT.format(values));
+            Map<String, List<String>> valuesByKey = XlsxColumnReader.read(file, SHEET_NUMBER,
+                    FIRST_DATA_ROW, KEY_COLUMN, VALUE_COLUMN, COLUMN_OFFSET, createSeparator());
+            System.out.println(OUTPUT_FORMAT.format(valuesByKey));
         } catch (IOException | IllegalArgumentException exception) {
             System.err.println("Ошибка чтения Excel. " + exception.getMessage());
             System.exit(1);
@@ -67,26 +69,40 @@ public class Main {
     }
 }
 
-enum ArrayFormat {
-    JAVA("new String[] {", "}", '"'),
-    GROOVY("[", "] as String[]", '\'');
+enum MapFormat {
+    JAVA('"'),
+    GROOVY('\'');
 
-    private final String prefix;
-    private final String suffix;
     private final char quote;
 
-    ArrayFormat(String prefix, String suffix, char quote) {
-        this.prefix = prefix;
-        this.suffix = suffix;
+    MapFormat(char quote) {
         this.quote = quote;
     }
 
-    String format(List<String> values) {
-        StringJoiner array = new StringJoiner(", ", prefix, suffix);
-        for (String value : values) {
-            array.add(quote(value));
+    String format(Map<String, List<String>> valuesByKey) {
+        if (this == GROOVY) {
+            StringJoiner map = new StringJoiner(", ", "[", "]").setEmptyValue("[:]");
+            valuesByKey.forEach((key, values) -> map.add(quote(key) + ": "
+                    + formatValues(values, "[", "]")));
+            return map.toString();
         }
-        return array.toString();
+
+        StringJoiner map = new StringJoiner(", ", "java.util.Map.ofEntries(", ")")
+                .setEmptyValue("java.util.Map.<String, java.util.List<String>>of()");
+        valuesByKey.forEach((key, values) -> {
+            String list = values.isEmpty() ? "java.util.List.<String>of()"
+                    : formatValues(values, "java.util.List.of(", ")");
+            map.add("java.util.Map.entry(" + quote(key) + ", " + list + ")");
+        });
+        return map.toString();
+    }
+
+    private String formatValues(List<String> values, String prefix, String suffix) {
+        StringJoiner list = new StringJoiner(", ", prefix, suffix);
+        for (String value : values) {
+            list.add(quote(value));
+        }
+        return list.toString();
     }
 
     private String quote(String value) {
@@ -129,17 +145,11 @@ final class XlsxColumnReader {
     private XlsxColumnReader() {
     }
 
-    static List<String> read(Path file, int sheetNumber, int firstRow, String column,
-                             int offset, Pattern separator) throws IOException {
-        String baseColumn = column.strip().toUpperCase(Locale.ROOT);
-        if (!baseColumn.matches("[A-Z]{1,3}")) {
-            throw new IllegalArgumentException("Укажите букву столбца, например B или AA.");
-        }
-        int baseIndex = columnIndex(baseColumn);
-        long targetIndex = (long) baseIndex + offset;
-        if (baseIndex >= MAX_COLUMNS || targetIndex < 0 || targetIndex >= MAX_COLUMNS) {
-            throw new IllegalArgumentException("Столбец со сдвигом выходит за пределы листа.");
-        }
+    static Map<String, List<String>> read(Path file, int sheetNumber, int firstRow,
+                                           String keyColumn, String valueColumn, int offset,
+                                           Pattern separator) throws IOException {
+        int keyIndex = columnWithOffset(keyColumn, offset);
+        int valueIndex = columnWithOffset(valueColumn, offset);
         if (firstRow < 1 || firstRow > MAX_ROWS) {
             throw new IllegalArgumentException("Некорректный номер первой строки: " + firstRow);
         }
@@ -177,16 +187,17 @@ final class XlsxColumnReader {
             List<Integer> zeroWidths = stylesPath == null ? List.of()
                     : zeroWidths(readXml(zip, builder, stylesPath));
             Element worksheet = readXml(zip, builder, sheetPath);
-            return readRows(worksheet, (int) targetIndex, firstRow, separator, sharedStrings, zeroWidths);
+            return readRows(worksheet, keyIndex, valueIndex, firstRow, separator, sharedStrings, zeroWidths);
         } catch (ParserConfigurationException | SAXException exception) {
             throw new IOException("Не удалось разобрать XML книги.", exception);
         }
     }
 
-    private static List<String> readRows(Element worksheet, int targetIndex, int firstRow,
-                                         Pattern separator, List<String> sharedStrings,
-                                         List<Integer> zeroWidths) throws IOException {
-        List<String> values = new ArrayList<>();
+    private static Map<String, List<String>> readRows(Element worksheet, int keyIndex, int valueIndex,
+                                                       int firstRow, Pattern separator,
+                                                       List<String> sharedStrings,
+                                                       List<Integer> zeroWidths) throws IOException {
+        Map<String, List<String>> valuesByKey = new LinkedHashMap<>();
         int rowNumber = 0;
         for (Element row : children(child(worksheet, "sheetData"), "row")) {
             String rowReference = row.getAttribute("r");
@@ -195,26 +206,45 @@ final class XlsxColumnReader {
                 continue;
             }
 
+            Element keyCell = null;
+            Element valueCell = null;
             int index = -1;
             for (Element cell : children(row, "c")) {
                 String cellReference = cell.getAttribute("r");
                 index = cellReference.isEmpty() ? index + 1 : columnIndex(cellReference);
-                if (index == targetIndex) {
-                    String type = cell.getAttribute("t");
-                    String value = cellValue(cell, type, sharedStrings, zeroWidths);
-                    boolean text = type.equals("s") || type.equals("inlineStr") || type.equals("str");
-                    String[] parts = separator != null && text ? separator.split(value) : new String[]{value};
-                    for (String part : parts) {
-                        String trimmed = part.strip();
-                        if (!trimmed.isEmpty()) {
-                            values.add(trimmed);
-                        }
-                    }
+                if (index == keyIndex) {
+                    keyCell = cell;
+                }
+                if (index == valueIndex) {
+                    valueCell = cell;
+                }
+                if (keyCell != null && valueCell != null) {
                     break;
                 }
             }
+
+            if (keyCell == null) {
+                continue;
+            }
+            String key = cellValue(keyCell, keyCell.getAttribute("t"), sharedStrings, zeroWidths).strip();
+            if (key.isEmpty()) {
+                continue;
+            }
+            List<String> values = valuesByKey.computeIfAbsent(key, ignored -> new ArrayList<>());
+            if (valueCell != null) {
+                String type = valueCell.getAttribute("t");
+                String value = cellValue(valueCell, type, sharedStrings, zeroWidths);
+                boolean text = type.equals("s") || type.equals("inlineStr") || type.equals("str");
+                String[] parts = separator != null && text ? separator.split(value) : new String[]{value};
+                for (String part : parts) {
+                    String trimmed = part.strip();
+                    if (!trimmed.isEmpty()) {
+                        values.add(trimmed);
+                    }
+                }
+            }
         }
-        return values;
+        return valuesByKey;
     }
 
     private static String cellValue(Element cell, String type, List<String> sharedStrings,
@@ -267,6 +297,19 @@ final class XlsxColumnReader {
         return children(child(styles, "cellXfs"), "xf").stream()
                 .map(style -> widths.getOrDefault(style.getAttribute("numFmtId"), 0))
                 .toList();
+    }
+
+    private static int columnWithOffset(String column, int offset) {
+        String baseColumn = column.strip().toUpperCase(Locale.ROOT);
+        if (!baseColumn.matches("[A-Z]{1,3}")) {
+            throw new IllegalArgumentException("Укажите букву столбца, например B или AA.");
+        }
+        int baseIndex = columnIndex(baseColumn);
+        long targetIndex = (long) baseIndex + offset;
+        if (baseIndex >= MAX_COLUMNS || targetIndex < 0 || targetIndex >= MAX_COLUMNS) {
+            throw new IllegalArgumentException("Столбец " + baseColumn + " со сдвигом выходит за пределы листа.");
+        }
+        return (int) targetIndex;
     }
 
     private static int columnIndex(String reference) {
